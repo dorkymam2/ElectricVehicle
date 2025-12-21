@@ -1,0 +1,93 @@
+#include <DualTB9051FTGMotorShield.h>
+#include <util/atomic.h> // For the ATOMIC_BLOCK macro
+
+#define ENCB 3 // WHITE
+
+volatile int posi = 0; // specify posi as volatile
+
+DualTB9051FTGMotorShield motor;
+
+float targetDistance = 8.35; // set point in meters
+float targetTime = 15; // target time in seconds
+float CPR = 211.2*0.25; // counts per revolution
+float diameter = 0.073025; // diameter of wheel in  meters
+float circumference = PI * diameter; // circukjmference of wheel in meters
+
+// P Control
+float setPoint = targetDistance * (1/circumference) * CPR; // target distance in ticks
+float error;
+float Kp = 0.2;
+float PWM;
+
+float setPWM;
+float actualPWM;
+float cruisePWM = 100;
+
+float prevTime;
+float prevPos;
+float vel_tps; 
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(ENCB,INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCB),readEncoder,RISING);
+ 
+  motor.init();
+  motor.enableDrivers();
+}
+
+//*************CONTROL LOOP*************//
+void loop() {
+  // Read the position in an atomic block to avoid a potential
+  // misread if the interrupt coincides with this code running
+  // see: https://www.arduino.cc/reference/en/language/variables/variable-scope-qualifiers/volatile/
+  float pos = 0;
+  unsigned long now = millis();
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    pos = posi;
+  }
+
+  // actual displacement and velocity calculation
+ float dt = (now - prevTime) / 1000.0;
+ 
+ if (dt > 0) {
+ vel_tps = (pos - prevPos) / dt;
+ }
+
+ prevTime = now;
+ prevPos = pos; 
+ Serial.print(vel_tps);
+
+  //Velocity Control
+  if (pos <= 0.25*setPoint){
+    setPWM = cruisePWM * sqrt(pos/(0.30*setPoint)) + 100;
+    if (setPWM >= cruisePWM){
+      setPWM = cruisePWM;
+    }
+    motor.setM1Speed(setPWM);
+  }
+
+  //Position control
+  else {
+    error = setPoint - pos;
+    PWM = Kp * error;
+    if (error <= 0){
+      PWM = 0;
+    }
+    if (PWM >= setPWM){
+      PWM = cruisePWM;
+    }
+   
+    motor.setM1Speed(PWM);
+  }
+}
+ 
+void readEncoder(){
+  int b = digitalRead(ENCB);
+  if(b > 0){
+    posi++;
+  }
+  else{
+    posi--;
+  }
+}
