@@ -1,0 +1,109 @@
+#include <DualTB9051FTGMotorShield.h>
+#include <util/atomic.h> // For the ATOMIC_BLOCK macro
+
+#define ENCB 3 // WHITE
+
+volatile int posi = 0; // specify posi as volatile
+
+DualTB9051FTGMotorShield motor;
+
+//**Target Variables in SI Units**//
+float targetDistance = 8.35; // set point in meters
+float targetTime = 10; // target time in seconds
+
+//**SI to ticks conversion factors**//
+float CPR = 211.2*0.25; // counts per revolution
+float diameter = 0.073025; // diameter of wheel in  meters
+float circumference = PI * diameter; // circumference of wheel in meters
+
+// Position Variables
+float lastPos = 0;
+float targetTicks = targetDistance * (1/circumference) * CPR; // target distance in ticks
+float posError;
+float Kp = 0.2;
+float PWM;
+
+//Velocity Variables
+float dt = 0;
+float velAvg = 100; //targetTicks/targetTime; // average velocity over run in ticks per second
+float actVel; //actual velocity in ticks per second;
+float velError;
+float Kv = 0.2;
+
+//Phase fractions
+float accelFrac = 0.25;
+float cruiseFrac = 0.50;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(ENCB,INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENCB),readEncoder,RISING);
+  motor.init();
+  motor.enableDrivers();
+}
+
+//*************CONTROL LOOP*************//
+void loop() {
+  // Read the position in an atomic block to avoid a potential
+  // misread if the interrupt coincides with this code running
+  // see: https://www.arduino.cc/reference/en/language/variables/variable-scope-qualifiers/volatile/
+  float pos = 0;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    pos = posi;
+  }
+  //Compute dt
+  unsigned long lastTime = millis();
+  unsigned long now = millis();
+  dt = (now - lastTime)/1000.0;
+  lastTime = now;
+
+  //Compute actual Velocity
+  float dx = pos - lastPos;
+  lastPos = pos;
+  
+  float actVel = dx/dt; 
+
+  //**Velocity controller**//
+
+  //Acceleration phase 
+  if ((millis()/1000.0) < (accelFrac * targetTime)){
+    float desiredVel = (velAvg) * ((millis() / 1000.0) / (accelFrac * targetTime));
+    velError = desiredVel; //- actVel;
+    PWM = desiredVel;
+
+    if (PWM < 100){
+      PWM = 100;
+    }    
+    motor.setM1Speed(PWM);
+    
+  }
+
+  if ((millis()/1000.0) >= (accelFrac * targetTime) && millis()/1000.0 < (accelFrac + cruiseFrac) * targetTime){
+    PWM = velAvg;
+    motor.setM1Speed(PWM);
+  }
+
+  if ((millis()/1000.0 >= (accelFrac + cruiseFrac) * targetTime)) {
+    posError = targetTicks - pos;
+    PWM = Kp * posError;
+    if (posError <= 0){
+      PWM = 0;
+    }
+    if (PWM >= velAvg){
+      PWM = velAvg;
+    }
+   
+    motor.setM1Speed(PWM);
+  }
+  
+}
+ 
+void readEncoder(){
+  int b = digitalRead(ENCB);
+  if(b > 0){
+    posi++;
+  }
+  else{
+    posi--;
+  }
+}
