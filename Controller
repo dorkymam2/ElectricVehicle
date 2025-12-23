@@ -7,7 +7,7 @@ volatile int posi = 0; // specify posi as volatile
 
 DualTB9051FTGMotorShield motor;
 
-float targetDistance = 7 + 0.2; // set point in meters
+float targetDistance = 10.35; // set point in meters
 float targetTime = 15; // target time in seconds
 float CPR = 211.2*0.25; // counts per revolution
 float diameter = 0.073025; // diameter of wheel in  meters
