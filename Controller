@@ -7,7 +7,7 @@ volatile int posi = 0; // specify posi as volatile
 
 DualTB9051FTGMotorShield motor;
 
-float targetDistance = 9.12; // set point in meters 7:7.12, 
+float targetDistance = 7.30; // set point in meters, 
 float targetTime = 15; // target time in seconds
 float CPR = 211.2 * 0.25; // counts per revolution
 float diameter = 0.073025; // diameter of wheel in  meters
@@ -16,10 +16,10 @@ float circumference = PI * diameter; // circukjmference of wheel in meters
 // P Control Variables
 float setPoint = targetDistance * (1/circumference) * CPR; // target distance in ticks
 float error;
-float Kp = 0.3;
+float Kp = 0.3; 
 float PWM;
 
-float maxPWM = 90;
+float maxPWM = 105;
 
 void setup() {
   Serial.begin(9600);
@@ -49,7 +49,7 @@ void loop() {
     }
 
     else {
-      PWM = 90;
+      PWM = 105;
       motor.setM1Speed(PWM);
       
     }
