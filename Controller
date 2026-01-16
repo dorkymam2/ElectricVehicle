@@ -2,12 +2,12 @@
 #include <util/atomic.h> // For the ATOMIC_BLOCK macro
 
 #define ENCB 3 // WHITE
-
+#define BUTTON_PIN 2 
 volatile int posi = 0; // specify posi as volatile
 
 DualTB9051FTGMotorShield motor;
 
-float targetDistance = 7.30; // set point in meters, 
+float targetDistance = 9.42; // set point in meters, 
 float targetTime = 15; // target time in seconds
 float CPR = 211.2 * 0.25; // counts per revolution
 float diameter = 0.073025; // diameter of wheel in  meters
@@ -21,9 +21,13 @@ float PWM;
 
 float maxPWM = 105;
 
+bool started = false;
+
 void setup() {
   Serial.begin(9600);
   pinMode(ENCB,INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
   attachInterrupt(digitalPinToInterrupt(ENCB),readEncoder,RISING);
  
   motor.init();
@@ -35,6 +39,15 @@ void loop() {
   // Read the position in an atomic block to avoid a potential
   // misread if the interrupt coincides with this code running
   // see: https://www.arduino.cc/reference/en/language/variables/variable-scope-qualifiers/volatile/
+  if (!started) {
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      delay(1000);
+      posi = 0;
+      started = true;
+    }
+    return;
+  }
+
   float pos = 0;
   unsigned long now = millis();
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
