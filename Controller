@@ -7,7 +7,7 @@ volatile int posi = 0; // specify posi as volatile
 
 DualTB9051FTGMotorShield motor;
 
-float targetDistance = 9.42; // set point in meters, 
+float targetDistance = 9.85; // set point in meters, 
 float targetTime = 15; // target time in seconds
 float CPR = 211.2 * 0.25; // counts per revolution
 float diameter = 0.073025; // diameter of wheel in  meters
@@ -19,7 +19,7 @@ float error;
 float Kp = 0.3; 
 float PWM;
 
-float maxPWM = 105;
+float maxPWM = 100;
 
 bool started = false;
 
@@ -41,7 +41,7 @@ void loop() {
   // see: https://www.arduino.cc/reference/en/language/variables/variable-scope-qualifiers/volatile/
   if (!started) {
     if (digitalRead(BUTTON_PIN) == LOW) {
-      delay(1000);
+      delay(3000);
       posi = 0;
       started = true;
     }
@@ -55,33 +55,33 @@ void loop() {
   }
 
   //Velocity Control
-  if (pos <= 0.75*setPoint){
-    if (pos <= 0.05 * setPoint){
-      PWM = 120;
-      motor.setM1Speed(PWM);
-    }
-
+  
+  if (pos <= 0.03 * setPoint){
+    PWM = 150;
+    motor.setM1Speed(PWM);
+  }
+  /*
     else {
       PWM = 105;
       motor.setM1Speed(PWM);
       
     }
   }
-
+  */
   //Position control
-  else {
+  else{
     error = setPoint - pos;
     PWM = Kp * error;
     if (error <= 0){
       PWM = 0;
     }
     if (PWM >= maxPWM){
-      PWM = maxPWM;
+     PWM = maxPWM;
     }
-   
+  }
     motor.setM1Speed(PWM);
   }
-}
+
  
 void readEncoder(){
   int b = digitalRead(ENCB);
