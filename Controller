@@ -1,6 +1,6 @@
 #include <DualTB9051FTGMotorShield.h>
 #include <util/atomic.h> // For the ATOMIC_BLOCK macro
-
+#3.55 is straight
 #define ENCB 3 // WHITE
 #define BUTTON_PIN 2 
 volatile int posi = 0; // specify posi as volatile
