@@ -1,1 +1,266 @@
+#include <DualTB9051FTGMotorShield.h>
+#include <util/atomic.h> // For the ATOMIC_BLOCK macro
 
+#define ENCB 3        // WHITE
+#define ENCA 5
+#define BUTTON_PIN 2
+
+volatile long posi = 0; // encoder ticks: counts UP going forward, DOWN going backward
+
+DualTB9051FTGMotorShield motor;
+
+//=====================================================================
+// 1. INPUTS / GIVEN VALUES
+//=====================================================================
+
+// ---------- PART 1: forward run ----------
+float targetDistance = 7.05;  // meters forward
+float targetTime     = 15;  // seconds
+
+float accelFrac = 0.2;     // fraction of targetTime spent accelerating
+float decelFrac = 0.20;     // fraction of targetTime spent decelerating
+                            // (cruise gets whatever is left: 1 - accelFrac - decelFrac)
+
+// ---------- PAUSE between Part 1 and Part 2 ----------
+float pauseTime = 2.0;      // seconds the motor is off between the two parts
+
+// ---------- PART 2: backward run ----------
+float targetDistance2 = 2.7;  // meters BACKWARD, measured from where Part 1 stops
+float targetTime2     = 5;  // seconds
+
+float accelFrac2 = 0.10;    // same idea as Part 1, but for the backward trapezoid
+float decelFrac2 = 0.20;
+
+// ---------- Hardware ----------
+float CPR      = 211.2 * 0.25;        // counts per wheel revolution (rising edge of one channel only)
+float diameter = 0.073025;            // wheel diameter in meters
+float circumference = PI * diameter;  // wheel circumference in meters
+
+// Controller gain
+float Kp = 50.0;      // PWM added per (m/s) of velocity error, applied every control period
+float minPWM = 60;    // floor that keeps the car rolling until it reaches the target.
+                      // In the test log the car stalled once PWM sagged to about 50.
+float maxPWM = 400;   // output cap (library accepts -400 to 400)
+float PWM = 0;        // current motor command MAGNITUDE (always >= 0). The sign for
+                      // forward/backward is applied with "dir" when it is sent to the motor.
+
+const unsigned long LOOP_MS = 100;    // control period. One tick is ~4.3 mm, so a shorter
+                                      // period makes the velocity measurement very noisy.
+
+//=====================================================================
+// Values calculated for whichever part is currently running
+//=====================================================================
+float ticksPerMeter;
+float setPoint;                  // target of the current part in ticks (+ forward, - backward)
+float tAccel, tCruise, tDecel;   // phase durations (s)
+float vMax;                      // m/s
+float aAccel, aDecel;            // m/s^2 (for reference / printing)
+int   dir = 1;                   // +1 = driving forward, -1 = driving backward
+
+// Run-time state
+enum RunState { WAIT_BUTTON, PART1, PAUSE, PART2, DONE };
+RunState state = WAIT_BUTTON;
+
+unsigned long startMs;        // when the whole run started (used for the log time)
+unsigned long phaseStartMs;   // when the current part (or the pause) started
+unsigned long lastLoopMs;
+long lastPos = 0;
+
+//=====================================================================
+// Loads the trapezoid for one part of the run.
+// direction: +1 = forward, -1 = backward
+//=====================================================================
+void loadProfile(float distance, float time, float aFrac, float dFrac, int direction) {
+  dir = direction;
+
+  // Target in encoder ticks. Backward parts get a NEGATIVE target.
+  setPoint = direction * distance * ticksPerMeter;
+
+  tAccel  = aFrac * time;
+  tDecel  = dFrac * time;
+  tCruise = time - tAccel - tDecel;
+
+  // Area of the trapezoid = distance:
+  //   D = 0.5*Vmax*tAccel + Vmax*tCruise + 0.5*Vmax*tDecel
+  //   -> Vmax = 2D / (T * (2 - accelFrac - decelFrac))
+  // (Vmax, aAccel and aDecel are speeds/accelerations in the direction of travel,
+  //  so they are positive for both parts. "dir" supplies the sign.)
+  vMax   = (2.0 * distance) / (time * (2.0 - aFrac - dFrac));
+  aAccel = vMax / tAccel;
+  aDecel = vMax / tDecel;
+}
+
+//=====================================================================
+// Restarts the encoder count and the part clock at the beginning of a part
+//=====================================================================
+void beginPhase() {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    posi = 0;
+  }
+  lastPos = 0;
+  PWM = 0;
+  phaseStartMs = millis();
+  lastLoopMs = phaseStartMs;
+}
+
+void printProfile(const char* label) {
+  Serial.println(label);
+  Serial.print("  Vmax (m/s): ");    Serial.println(vMax);
+  Serial.print("  Accel (m/s^2): "); Serial.println(aAccel);
+  Serial.print("  Decel (m/s^2): "); Serial.println(aDecel);
+  Serial.print("  Target ticks: ");  Serial.println(setPoint);
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(ENCB, INPUT);
+  pinMode(ENCA, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(ENCB), readEncoder, RISING);
+
+  motor.init();
+  motor.enableDrivers();
+
+  //===================================================================
+  // 2. CALCULATE PROFILE VALUES (printed here so you can check them)
+  //===================================================================
+  if (accelFrac + decelFrac >= 1.0) {
+    Serial.println("Part 1: accelFrac + decelFrac must be < 1 (need some cruise time)");
+    while (true);
+  }
+  if (accelFrac2 + decelFrac2 >= 1.0) {
+    Serial.println("Part 2: accelFrac2 + decelFrac2 must be < 1 (need some cruise time)");
+    while (true);
+  }
+
+  ticksPerMeter = CPR / circumference;
+
+  loadProfile(targetDistance, targetTime, accelFrac, decelFrac, +1);
+  printProfile("PART 1 (forward)");
+
+  loadProfile(targetDistance2, targetTime2, accelFrac2, decelFrac2, -1);
+  printProfile("PART 2 (backward)");
+
+  Serial.print("Pause (s): "); Serial.println(pauseTime);
+  Serial.println("t,vDes,vMeas,PWM,ticks");
+}
+
+//*************CONTROL LOOP*************//
+void loop() {
+  // Wait for button, then start Part 1
+  if (state == WAIT_BUTTON) {
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      delay(3000);
+      loadProfile(targetDistance, targetTime, accelFrac, decelFrac, +1);
+      beginPhase();             // zeroes the encoder count and the part clock
+      startMs = phaseStartMs;   // the log time starts here and keeps running through both parts
+      state = PART1;
+    }
+    return;
+  }
+
+  if (state == DONE) {
+    motor.setM1Speed(0);
+    return;
+  }
+
+  // Run the controller on a fixed period so velocity is measured over a clean window
+  unsigned long nowMs = millis();
+  if (nowMs - lastLoopMs < LOOP_MS) return;
+  float dt = (nowMs - lastLoopMs) / 1000.0;
+  lastLoopMs = nowMs;
+  float t      = (nowMs - startMs) / 1000.0;        // seconds since the whole run started (log only)
+  float tPhase = (nowMs - phaseStartMs) / 1000.0;   // seconds since this part (or the pause) started
+
+  // Read position in an atomic block to avoid a misread if the interrupt fires mid-read
+  long pos;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    pos = posi;
+  }
+
+  // Measured velocity (m/s) over the last period, positive when moving the way we WANT to go.
+  // Multiplying by dir flips the sign for the backward part so the controller always
+  // works with a positive speed.
+  float vMeas = (((pos - lastPos) * dir) / ticksPerMeter) / dt;
+  lastPos = pos;
+
+  float vDes = 0;
+
+  //===================================================================
+  // 3. MOTION PHASES
+  //===================================================================
+  if (state == PAUSE) {
+    // Motor off. When the pause is over, set up Part 2 and restart the count and the clock.
+    PWM = 0;
+    if (tPhase >= pauseTime) {
+      loadProfile(targetDistance2, targetTime2, accelFrac2, decelFrac2, -1);
+      beginPhase();   // encoder count back to 0, part clock back to 0
+      pos = 0;        // keep this loop's log line consistent with the reset
+      state = PART2;
+    }
+  }
+  else {
+    // PART1 or PART2: stop condition, with the trapezoid nested under it
+    bool reached = (dir > 0) ? (pos >= setPoint)    // forward: count rises to the target
+                             : (pos <= setPoint);   // backward: count falls to the (negative) target
+
+    if (reached) {
+      PWM = 0;               // reached the target distance: motor off
+      if (state == PART1) {
+        state = PAUSE;       // go to the pause between the two parts
+        phaseStartMs = nowMs;
+      }
+      else {
+        state = DONE;        // Part 2 finished
+      }
+    }
+    else {
+      if (tPhase < tAccel) {
+        // ACCELERATION: v(t) = (Vmax * t) / (accelFrac * time)
+        vDes = (vMax * tPhase) / tAccel;
+      }
+      else if (tPhase < tAccel + tCruise) {
+        // CRUISE: hold Vmax
+        vDes = vMax;
+      }
+      else {
+        // DECELERATION: v(t) = Vmax - (Vmax * t) / (decelFrac * time)
+        // where t here is time elapsed since the deceleration phase began
+        float tDec = tPhase - tAccel - tCruise;
+        vDes = vMax - (vMax * tDec) / tDecel;
+        if (vDes < 0) vDes = 0;
+      }
+
+      // P control applied on top of the current PWM: new PWM = old PWM + Kp * error
+      float error = vDes - vMeas;
+      PWM = PWM + Kp * error;
+      if (PWM < minPWM) PWM = minPWM;   // never sag into the stall zone before the target distance
+      if (PWM > maxPWM) PWM = maxPWM;   // clamping the stored value also prevents windup
+    }
+  }
+
+  // dir makes the command negative for the backward part
+  motor.setM1Speed(dir * PWM);
+
+  // Log (comma separated so it can be pasted into a spreadsheet).
+  // vDes, vMeas and PWM are logged with their sign, so Part 2 plots as a trapezoid below zero.
+  Serial.print(t);            Serial.print(",");
+  Serial.print(dir * vDes);   Serial.print(",");
+  Serial.print(dir * vMeas);  Serial.print(",");
+  Serial.print(dir * PWM);    Serial.print(",");
+  Serial.println(pos);
+}
+
+void readEncoder() {
+  // NOTE: no Serial printing in here, it is far too slow for an interrupt.
+  // Fires on the RISING edge of ENCB, then reads the OTHER channel (ENCA) to get the direction:
+  // posi counts up while the car drives forward and counts down while it backs up.
+  int a = digitalRead(ENCA);   // read the OTHER channel
+  if (a > 0) {
+    posi++;
+  }
+  else {
+    posi--;
+  }
+}
